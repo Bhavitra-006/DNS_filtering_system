@@ -1,0 +1,11 @@
+# Phishing
+test-phishing-001.example,PHISHING
+test-phishing-002.example,PHISHING
+TEST-PHISHING-003.EXAMPLE.,PHISHING
+https://test-phishing-004.example/path,PHISHING
+
+test-malware-001.example,MALWARE
+test-malware-002.example,MALWARE
+
+test-c2-001.example,C2_BOTNET
+test-c2-002.example,C2_BOTNET

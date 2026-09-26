@@ -1,0 +1,3 @@
+remote-test-001.example,PHISHING
+remote-test-002.example,MALWARE
+remote-test-003.example,C2_BOTNET
