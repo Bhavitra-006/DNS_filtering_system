@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Activity,
   ShieldAlert,
@@ -44,72 +44,133 @@ import {
   DASHBOARD_STATS,
   QUERIES_TIMELINE_HOURLY,
   THREAT_CATEGORIES,
-  QUERY_TYPE_DISTRIBUTION,
   TOP_QUERIED_DOMAINS,
   TOP_BLOCKED_DOMAINS,
   RECENT_DNS_QUERIES,
   SYSTEM_SERVICES,
 } from '../data/mockData';
 
-import { getStats } from '../api/api';
+import { getStats, getQueries, getAnalytics, getStatus } from '../api/api';
 
 export default function DashboardPage({ onNavigate }) {
-  // Pie chart data for Decisions
-    const [stats, setStats] = React.useState(null);
+  const [stats, setStats] = useState(null);
+  const [recentQueries, setRecentQueries] = useState([]);
+  const [analytics, setAnalytics] = useState(null);
+  const [systemStatus, setSystemStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  React.useEffect(() => {
-    getStats()
-      .then((data) => {
-        console.log('Dashboard stats:', data);
-        setStats(data);
-      })
-      .catch((error) => {
-        console.error('Failed to load dashboard stats:', error);
-      });
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadDashboardData() {
+      try {
+        const [statsData, queriesData, analyticsData, statusData] = await Promise.allSettled([
+          getStats(),
+          getQueries(8),
+          getAnalytics(),
+          getStatus(),
+        ]);
+
+        if (!isMounted) return;
+
+        if (statsData.status === 'fulfilled') {
+          setStats(statsData.value);
+        }
+        if (queriesData.status === 'fulfilled' && Array.isArray(queriesData.value?.queries)) {
+          const mapped = queriesData.value.queries.map((q, idx) => ({
+            id: `q-${idx}-${q.id}`,
+            timestamp: q.queried_at || 'Just now',
+            domain: q.domain || '-',
+            queryType: q.query_type || 'A',
+            decision: q.decision || 'ALLOW',
+            threatType: q.threat_type || 'Clean',
+            responseCode: q.response_code || 'NOERROR',
+            responseTime: q.response_time_ms ? `${Number(q.response_time_ms).toFixed(1)} ms` : '1.2 ms',
+          }));
+          setRecentQueries(mapped);
+        }
+        if (analyticsData.status === 'fulfilled') {
+          setAnalytics(analyticsData.value);
+        }
+        if (statusData.status === 'fulfilled') {
+          setSystemStatus(statusData.value);
+        }
+      } catch (err) {
+        console.error('Failed to load dashboard telemetry:', err);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    }
+
+    loadDashboardData();
+    const interval = setInterval(loadDashboardData, 10000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
-  const totalQueries = stats
-    ? Number(stats.total || 0)
-    : DASHBOARD_STATS.totalQueries;
-
-  const allowedQueries = stats
-    ? Number(stats.allowed || 0)
-    : DASHBOARD_STATS.allowedQueries;
-
-  const blockedQueries = stats
-    ? Number(stats.blocked || 0)
-    : DASHBOARD_STATS.blockedQueries;
+  const totalQueries = stats ? Number(stats.total || 0) : DASHBOARD_STATS.totalQueries;
+  const allowedQueries = stats ? Number(stats.allowed || 0) : DASHBOARD_STATS.allowedQueries;
+  const blockedQueries = stats ? Number(stats.blocked || 0) : DASHBOARD_STATS.blockedQueries;
+  const flaggedQueries = stats ? Number(stats.flagged || 0) : Number(DASHBOARD_STATS.flaggedQueries || 0);
+  const threatsDetected = stats ? Number(stats.threats_detected || 0) : DASHBOARD_STATS.threatsDetected;
 
   const allowedPercent =
-    totalQueries > 0
-      ? ((allowedQueries / totalQueries) * 100).toFixed(1) + '%'
-      : '0%';
-
+    totalQueries > 0 ? ((allowedQueries / totalQueries) * 100).toFixed(1) + '%' : '0%';
   const blockedPercent =
-    totalQueries > 0
-      ? ((blockedQueries / totalQueries) * 100).toFixed(1) + '%'
-      : '0%';
+    totalQueries > 0 ? ((blockedQueries / totalQueries) * 100).toFixed(1) + '%' : '0%';
+  const blockRate = stats?.block_rate || blockedPercent;
+  const cacheHitRate = stats?.cache_hit_rate || DASHBOARD_STATS.cacheHitRate;
 
-  const blockRate = blockedPercent;
-    const decisionData = [
-    {
-      name: 'Allowed',
-      value: allowedQueries,
-      color: '#10b981',
-    },
-    {
-      name: 'Blocked',
-      value: blockedQueries,
-      color: '#f43f5e',
-    },
-    {
-      name: 'Flagged',
-      value: Number(DASHBOARD_STATS.flaggedQueries || 0),
-      color: '#f59e0b',
-    },
+  const decisionData = [
+    { name: 'Allowed', value: allowedQueries, color: '#10b981' },
+    { name: 'Blocked', value: blockedQueries, color: '#f43f5e' },
+    { name: 'Flagged', value: flaggedQueries, color: '#f59e0b' },
   ];
 
-  // Recent queries columns
+  // Timeline chart data (use real backend data if available, fallback to mock)
+  const timelineData =
+    analytics?.hourly_timeline && analytics.hourly_timeline.length > 0
+      ? analytics.hourly_timeline.map((h) => ({
+          time: h.time,
+          allowed: Number(h.allowed || 0),
+          blocked: Number(h.blocked || 0),
+          flagged: Number(h.flagged || 0),
+          total: Number(h.total || 0),
+        }))
+      : QUERIES_TIMELINE_HOURLY;
+
+  // Threat categories data
+  const threatCategoriesData =
+    analytics?.threat_categories && analytics.threat_categories.length > 0
+      ? analytics.threat_categories.map((tc, idx) => ({
+          name: tc.threat_type,
+          count: Number(tc.count || 0),
+          color: ['#f43f5e', '#ec4899', '#f59e0b', '#8b5cf6', '#3b82f6'][idx % 5],
+        }))
+      : THREAT_CATEGORIES;
+
+  // Top queried domains
+  const topQueriedList =
+    analytics?.top_queried && analytics.top_queried.length > 0
+      ? analytics.top_queried.map((t) => ({
+          domain: t.domain,
+          category: 'Standard',
+          count: Number(t.count || 0),
+        }))
+      : TOP_QUERIED_DOMAINS;
+
+  // Top blocked domains
+  const topBlockedList =
+    analytics?.top_blocked && analytics.top_blocked.length > 0
+      ? analytics.top_blocked.map((t) => ({
+          domain: t.domain,
+          category: t.threat_type || 'Malicious',
+          count: Number(t.count || 0),
+        }))
+      : TOP_BLOCKED_DOMAINS;
+
   const recentColumns = [
     {
       key: 'timestamp',
@@ -118,7 +179,7 @@ export default function DashboardPage({ onNavigate }) {
       sortable: true,
       render: (row) => (
         <span className="font-mono text-xs text-slate-400">
-          {row.timestamp.split(' ')[1]}
+          {row.timestamp.includes(' ') ? row.timestamp.split(' ')[1] : row.timestamp}
         </span>
       ),
     },
@@ -128,7 +189,10 @@ export default function DashboardPage({ onNavigate }) {
       sortable: true,
       render: (row) => (
         <div className="flex items-center gap-2 max-w-[280px]">
-          <span className="font-mono text-xs text-slate-200 truncate hover:text-sky-400 transition-colors" title={row.domain}>
+          <span
+            className="font-mono text-xs text-slate-200 truncate hover:text-sky-400 transition-colors"
+            title={row.domain}
+          >
             {row.domain}
           </span>
         </div>
@@ -177,7 +241,11 @@ export default function DashboardPage({ onNavigate }) {
         subtitle="Real-time SOC telemetry, deep packet inspection, and threat stream analytics"
         icon={Activity}
         badge={
-          <StatusBadge type="system" value="ONLINE" label="STREAM ACTIVE" />
+          <StatusBadge
+            type="system"
+            value="ONLINE"
+            label={systemStatus?.status === 'READY' ? 'DAEMON READY (5354)' : 'STREAM ACTIVE'}
+          />
         }
         actions={
           <div className="flex items-center gap-2">
@@ -211,7 +279,7 @@ export default function DashboardPage({ onNavigate }) {
           icon={Activity}
           iconColor="text-sky-400"
           iconBg="bg-sky-500/10"
-          footer="Past 24 hours"
+          footer="Persistent MySQL log"
         />
 
         <StatCard
@@ -229,7 +297,7 @@ export default function DashboardPage({ onNavigate }) {
           title="Blocked Queries"
           value={blockedQueries.toLocaleString()}
           subValue={`${blockedPercent} blocked`}
-          change={DASHBOARD_STATS.blockedQueriesChange}
+          change={stats ? `${blockedQueries} intercepted` : DASHBOARD_STATS.blockedQueriesChange}
           changeType="bad"
           icon={ShieldX}
           iconColor="text-rose-400"
@@ -238,9 +306,9 @@ export default function DashboardPage({ onNavigate }) {
 
         <StatCard
           title="Flagged Queries"
-          value={DASHBOARD_STATS.flaggedQueriesFormatted}
-          subValue={`${DASHBOARD_STATS.flaggedQueriesPercent} under review`}
-          change={DASHBOARD_STATS.flaggedQueriesChange}
+          value={flaggedQueries.toLocaleString()}
+          subValue={totalQueries > 0 ? `${((flaggedQueries / totalQueries) * 100).toFixed(1)}% under review` : '0%'}
+          change="Behavioral alerts"
           changeType="neutral"
           icon={ShieldAlert}
           iconColor="text-amber-400"
@@ -250,41 +318,41 @@ export default function DashboardPage({ onNavigate }) {
         <StatCard
           title="Block Rate"
           value={blockRate}
-          change={DASHBOARD_STATS.blockRateChange}
+          change="Mitigation ratio"
           changeType="good"
           icon={TrendingUp}
           iconColor="text-rose-400"
           iconBg="bg-rose-500/10"
-          footer="Average mitigation ratio"
+          footer="Enforced security ratio"
         />
 
         <StatCard
           title="Threats Detected"
-          value={DASHBOARD_STATS.threatsDetectedFormatted}
-          change={DASHBOARD_STATS.threatsDetectedChange}
+          value={threatsDetected.toLocaleString()}
+          change={stats ? `${stats.active_rules || 14} active rules` : DASHBOARD_STATS.threatsDetectedChange}
           changeType="bad"
           icon={Zap}
           iconColor="text-purple-400"
           iconBg="bg-purple-500/10"
-          footer="Zero-day & IOC matches"
+          footer="IOC feeds & DGA ML"
         />
 
         <StatCard
           title="Cache Hit Rate"
-          value={DASHBOARD_STATS.cacheHitRate}
-          change={DASHBOARD_STATS.cacheHitRateChange}
+          value={cacheHitRate}
+          change={stats ? `${stats.cache_hits || 0} hits / ${stats.cache_misses || 0} miss` : 'In-memory TTL'}
           changeType="good"
           icon={Layers}
           iconColor="text-emerald-400"
           iconBg="bg-emerald-500/10"
-          footer="1.24M keys in Redis"
+          footer="Memory cache engine"
         />
 
         <StatCard
           title="System Status"
-          value="OPERATIONAL"
+          value={systemStatus?.database_status === 'ONLINE' ? 'OPERATIONAL' : 'ONLINE'}
           statusBadge={<StatusBadge type="system" value="ONLINE" />}
-          change="8/8 Active Microservices"
+          change="DNS + API Services"
           changeType="good"
           icon={Server}
           iconColor="text-sky-400"
@@ -294,11 +362,11 @@ export default function DashboardPage({ onNavigate }) {
 
       {/* Main Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left: 24h Query Volume Stream (Span 2) */}
+        {/* Left: Query Volume Stream */}
         <div className="lg:col-span-2">
           <ChartCard
-            title="DNS Queries Over Time (24h)"
-            subtitle="Real-time timeline comparing allowed, blocked, and flagged traffic"
+            title="DNS Queries Stream Over Time"
+            subtitle="Comparing allowed, blocked, and flagged traffic"
             icon={Activity}
             height={300}
             actions={
@@ -316,20 +384,20 @@ export default function DashboardPage({ onNavigate }) {
             }
           >
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={QUERIES_TIMELINE_HOURLY} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
+              <AreaChart data={timelineData} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
                 <defs>
                   <linearGradient id="colorAllowed" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.35}/>
-                    <stop offset="95%" stopColor="#38bdf8" stopOpacity={0.0}/>
+                    <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.35} />
+                    <stop offset="95%" stopColor="#38bdf8" stopOpacity={0.0} />
                   </linearGradient>
                   <linearGradient id="colorBlocked" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.4}/>
-                    <stop offset="95%" stopColor="#f43f5e" stopOpacity={0.0}/>
+                    <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.4} />
+                    <stop offset="95%" stopColor="#f43f5e" stopOpacity={0.0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.6} />
                 <XAxis dataKey="time" stroke="#64748b" fontSize={11} tickLine={false} />
-                <YAxis stroke="#64748b" fontSize={11} tickLine={false} tickFormatter={(val) => `${val / 1000}k`} />
+                <YAxis stroke="#64748b" fontSize={11} tickLine={false} />
                 <Tooltip
                   contentStyle={{
                     backgroundColor: '#0f172a',
@@ -339,8 +407,24 @@ export default function DashboardPage({ onNavigate }) {
                   }}
                   itemStyle={{ padding: '2px 0' }}
                 />
-                <Area type="monotone" dataKey="allowed" name="Allowed" stroke="#38bdf8" strokeWidth={2} fillOpacity={1} fill="url(#colorAllowed)" />
-                <Area type="monotone" dataKey="blocked" name="Blocked" stroke="#f43f5e" strokeWidth={2} fillOpacity={1} fill="url(#colorBlocked)" />
+                <Area
+                  type="monotone"
+                  dataKey="allowed"
+                  name="Allowed"
+                  stroke="#38bdf8"
+                  strokeWidth={2}
+                  fillOpacity={1}
+                  fill="url(#colorAllowed)"
+                />
+                <Area
+                  type="monotone"
+                  dataKey="blocked"
+                  name="Blocked"
+                  stroke="#f43f5e"
+                  strokeWidth={2}
+                  fillOpacity={1}
+                  fill="url(#colorBlocked)"
+                />
               </AreaChart>
             </ResponsiveContainer>
           </ChartCard>
@@ -350,7 +434,7 @@ export default function DashboardPage({ onNavigate }) {
         <div className="lg:col-span-1">
           <ChartCard
             title="Traffic Decision Distribution"
-            subtitle="Policy enforcement proportion"
+            subtitle="Live enforcement proportions"
             icon={ShieldCheck}
             height={300}
           >
@@ -397,8 +481,10 @@ export default function DashboardPage({ onNavigate }) {
                       {item.name === 'Allowed'
                         ? allowedPercent
                         : item.name === 'Blocked'
-                          ? blockedPercent
-                          : DASHBOARD_STATS.flaggedQueriesPercent}
+                        ? blockedPercent
+                        : totalQueries > 0
+                        ? `${((flaggedQueries / totalQueries) * 100).toFixed(1)}%`
+                        : '0%'}
                     </span>
                   </div>
                 ))}
@@ -420,7 +506,7 @@ export default function DashboardPage({ onNavigate }) {
           >
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
-                data={THREAT_CATEGORIES.slice(0, 5)}
+                data={threatCategoriesData.slice(0, 5)}
                 layout="vertical"
                 margin={{ top: 5, right: 20, left: 20, bottom: 5 }}
               >
@@ -437,7 +523,7 @@ export default function DashboardPage({ onNavigate }) {
                   formatter={(val) => [`${val} detections`, 'Count']}
                 />
                 <Bar dataKey="count" radius={[0, 4, 4, 0]}>
-                  {THREAT_CATEGORIES.slice(0, 5).map((entry, index) => (
+                  {threatCategoriesData.slice(0, 5).map((entry, index) => (
                     <Cell key={`bar-${index}`} fill={entry.color} />
                   ))}
                 </Bar>
@@ -463,7 +549,7 @@ export default function DashboardPage({ onNavigate }) {
             }
           >
             <div className="space-y-3">
-              {TOP_QUERIED_DOMAINS.slice(0, 5).map((item, idx) => (
+              {topQueriedList.slice(0, 5).map((item, idx) => (
                 <div key={item.domain} className="flex items-center justify-between text-xs">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="w-5 text-slate-500 font-mono font-medium text-[11px]">#{idx + 1}</span>
@@ -473,7 +559,7 @@ export default function DashboardPage({ onNavigate }) {
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-[11px] text-slate-400 bg-slate-800/80 px-1.5 py-0.5 rounded">
-                      {item.category}
+                      {item.category || 'DNS'}
                     </span>
                     <span className="font-mono font-semibold text-slate-200">
                       {new Intl.NumberFormat().format(item.count)}
@@ -502,7 +588,7 @@ export default function DashboardPage({ onNavigate }) {
             }
           >
             <div className="space-y-3">
-              {TOP_BLOCKED_DOMAINS.slice(0, 5).map((item, idx) => (
+              {topBlockedList.slice(0, 5).map((item, idx) => (
                 <div key={item.domain} className="flex items-center justify-between text-xs">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="w-5 text-rose-400/80 font-mono font-medium text-[11px]">#{idx + 1}</span>
@@ -532,26 +618,22 @@ export default function DashboardPage({ onNavigate }) {
               Recent DNS Activity
             </h2>
             <p className="text-xs text-slate-400">
-              Live stream of recent DNS resolution requests inspected by the sentinel engine
+              Live queries logged to MySQL and inspected by the DNS filtering system
             </p>
           </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => onNavigate('queries')}
-          >
+          <Button variant="secondary" size="sm" onClick={() => onNavigate('queries')}>
             Explore All Queries
           </Button>
         </div>
 
         <DataTable
           columns={recentColumns}
-          data={RECENT_DNS_QUERIES.slice(0, 8)}
+          data={recentQueries.length > 0 ? recentQueries : RECENT_DNS_QUERIES.slice(0, 8)}
           showPagination={false}
         />
       </div>
 
-      {/* System Health Section (DNS Server, API Server, Database, Threat Intel, AI/ML Detection, DNS Cache) */}
+      {/* System Health Section */}
       <div>
         <div className="flex items-center justify-between mb-3">
           <div>
@@ -560,7 +642,7 @@ export default function DashboardPage({ onNavigate }) {
               Core Infrastructure Health
             </h2>
             <p className="text-xs text-slate-400">
-              Real-time operational status of the DNS filtering stack
+              Real-time operational status of DNS filter server, API, Database, and ML pipelines
             </p>
           </div>
           <button
@@ -573,35 +655,74 @@ export default function DashboardPage({ onNavigate }) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {SYSTEM_SERVICES.slice(0, 6).map((service) => (
-            <div
-              key={service.id}
-              className="p-4 rounded-xl bg-[#0f172a] border border-slate-800/90 hover:border-slate-700 transition-all flex flex-col justify-between"
-            >
-              <div className="flex items-start justify-between gap-3 mb-2">
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
-                    {service.name}
-                  </h3>
-                  <span className="text-[11px] text-slate-400">{service.subName}</span>
-                </div>
-                <StatusBadge type="system" value={service.status} />
+          <div className="p-4 rounded-xl bg-[#0f172a] border border-slate-800/90 flex flex-col justify-between">
+            <div className="flex items-start justify-between gap-3 mb-2">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-100">DNS Filtering Server</h3>
+                <span className="text-[11px] text-slate-400 font-mono">127.0.0.1:5354 (UDP)</span>
               </div>
-
-              <p className="text-xs text-slate-400 mb-3 line-clamp-2 leading-relaxed">
-                {service.description}
-              </p>
-
-              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/70 text-[11px] font-mono">
-                {service.metrics.slice(0, 2).map((m, mIdx) => (
-                  <div key={mIdx} className="bg-slate-900/60 p-1.5 rounded border border-slate-800/50">
-                    <div className="text-slate-500 text-[10px]">{m.label}</div>
-                    <div className="text-slate-200 font-semibold">{m.value}</div>
-                  </div>
-                ))}
+              <StatusBadge type="system" value="ONLINE" label="READY" />
+            </div>
+            <p className="text-xs text-slate-400 mb-3">
+              Upstream resolver pointing to 8.8.8.8:53 with sub-millisecond sinkholing.
+            </p>
+            <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/70 text-[11px] font-mono">
+              <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/50">
+                <div className="text-slate-500 text-[10px]">Active Port</div>
+                <div className="text-slate-200 font-semibold">{systemStatus?.dns_port || 5354}</div>
+              </div>
+              <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/50">
+                <div className="text-slate-500 text-[10px]">Upstream</div>
+                <div className="text-slate-200 font-semibold">{systemStatus?.upstream_dns || '8.8.8.8'}</div>
               </div>
             </div>
-          ))}
+          </div>
+
+          <div className="p-4 rounded-xl bg-[#0f172a] border border-slate-800/90 flex flex-col justify-between">
+            <div className="flex items-start justify-between gap-3 mb-2">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-100">MySQL Database</h3>
+                <span className="text-[11px] text-slate-400 font-mono">dns_filtering @ 3306</span>
+              </div>
+              <StatusBadge type="system" value="ONLINE" label="CONNECTED" />
+            </div>
+            <p className="text-xs text-slate-400 mb-3">
+              Persistent connection pool with asynchronous queue worker.
+            </p>
+            <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/70 text-[11px] font-mono">
+              <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/50">
+                <div className="text-slate-500 text-[10px]">Logged Queries</div>
+                <div className="text-slate-200 font-semibold">{totalQueries.toLocaleString()}</div>
+              </div>
+              <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/50">
+                <div className="text-slate-500 text-[10px]">Blocked Rules</div>
+                <div className="text-slate-200 font-semibold">{stats?.active_rules || 14}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-[#0f172a] border border-slate-800/90 flex flex-col justify-between">
+            <div className="flex items-start justify-between gap-3 mb-2">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-100">AI / ML DGA Detector</h3>
+                <span className="text-[11px] text-slate-400 font-mono">Random Forest Classifier</span>
+              </div>
+              <StatusBadge type="system" value="ONLINE" label="LOADED" />
+            </div>
+            <p className="text-xs text-slate-400 mb-3">
+              18-feature lexical entropy and n-gram inference for algorithmically generated domains.
+            </p>
+            <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/70 text-[11px] font-mono">
+              <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/50">
+                <div className="text-slate-500 text-[10px]">Threshold</div>
+                <div className="text-slate-200 font-semibold">80.0%</div>
+              </div>
+              <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/50">
+                <div className="text-slate-500 text-[10px]">Model</div>
+                <div className="text-slate-200 font-semibold">dga_model.pkl</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -111,7 +111,7 @@ export default function DnsQueriesPage() {
 
       return true;
     });
-  }, [searchTerm, decisionFilter, queryTypeFilter, threatTypeFilter]);
+  }, [queries, searchTerm, decisionFilter, queryTypeFilter, threatTypeFilter]);
 
   const hasActiveFilters =
     searchTerm !== '' ||

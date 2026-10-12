@@ -22,7 +22,8 @@ import StatusBadge from '../components/common/StatusBadge';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
 
-import { DOMAIN_CHECKER_PRESETS, generateDomainAnalysis } from '../data/mockData';
+import { checkDomain } from '../api/api';
+import { generateDomainAnalysis } from '../data/mockData';
 
 export default function DomainCheckerPage() {
   const [domainInput, setDomainInput] = useState('');
@@ -33,14 +34,14 @@ export default function DomainCheckerPage() {
 
   const samplePresets = [
     { label: 'Clean (Google)', domain: 'google.com' },
-    { label: 'Phishing Brand Spoof', domain: 'paypal-security-login-auth.xyz' },
-    { label: 'Malware C2 Beacon', domain: 'x7a9-cdn-beacon.top' },
-    { label: 'DGA High-Entropy', domain: 'dga-81bca09fe.cc' },
-    { label: 'DNS Tunneling Exfil', domain: 'tunnel-data-exfil.biz' },
-    { label: 'Clean (Cloudflare)', domain: 'cloudflare.com' },
+    { label: 'Blocked (Local Blocklist)', domain: 'malicious.test' },
+    { label: 'Threat Intel Feed', domain: 'test-phishing.example' },
+    { label: 'DGA / ML High Risk', domain: 'xj29ak91qz.com' },
+    { label: 'DNS Tunneling Exfil', domain: 'abcdef0123456789abcdef0123456789.tunnel.example.com' },
+    { label: 'Behavioral Anomaly', domain: 'login-verify-account.xyz' },
   ];
 
-  const handleCheckDomain = (targetDomain) => {
+  const handleCheckDomain = async (targetDomain) => {
     const domainToCheck = (targetDomain || domainInput).trim();
     if (!domainToCheck) {
       setError('Please provide a valid domain name to inspect.');
@@ -51,23 +52,39 @@ export default function DomainCheckerPage() {
     setIsAnalyzing(true);
     setResult(null);
 
-    // Multi-stage scan animation
-    setAnalysisStep('Querying Threat Feeds (AbuseIPDB, URLHaus, AlienVault)...');
+    setAnalysisStep('Normalizing domain and verifying cache...');
 
-    setTimeout(() => {
-      setAnalysisStep('Running AI/ML DGA & Entropy Classifier...');
-    }, 450);
-
-    setTimeout(() => {
-      setAnalysisStep('Evaluating Behavioral Patterns & Subdomain Length...');
-    }, 850);
-
-    setTimeout(() => {
-      const data = generateDomainAnalysis(domainToCheck);
+    try {
+      // Execute live security analysis pipeline on the backend
+      const data = await checkDomain(domainToCheck);
       setResult(data);
+    } catch (err) {
+      console.warn('Backend API unavailable, falling back to local heuristic analysis:', err);
+      const fallback = generateDomainAnalysis(domainToCheck);
+      setResult(fallback);
+    } finally {
       setIsAnalyzing(false);
       setAnalysisStep('');
-    }, 1200);
+    }
+  };
+
+  const getRiskScore = () => {
+    if (!result) return 0;
+    if (result.risk_score !== undefined) return result.risk_score;
+    if (result.riskScore !== undefined) return result.riskScore;
+    if (result.decision === 'BLOCK') return 95;
+    if (result.decision === 'FLAG') return 55;
+    return 5;
+  };
+
+  const getRiskLevel = () => {
+    const score = getRiskScore();
+    if (result?.risk_level) return result.risk_level;
+    if (result?.riskLevel) return result.riskLevel;
+    if (score >= 80) return 'Critical Risk';
+    if (score >= 50) return 'High Risk';
+    if (score >= 25) return 'Moderate Risk';
+    return 'Low Risk';
   };
 
   const getRiskScoreColor = (score) => {
@@ -84,12 +101,40 @@ export default function DomainCheckerPage() {
     return 'bg-emerald-500';
   };
 
+  const blocklistStatus =
+    result?.security_analysis?.blocklist ||
+    (result?.threat_type === 'blocked_domain' ? 'Blocked' : 'Clean');
+
+  const threatIntelStatus =
+    result?.security_analysis?.threat_intel ||
+    result?.threatIntel ||
+    (result?.threat_type && result.threat_type !== 'blocked_domain' && result.threat_type !== 'DGA_ML'
+      ? 'Malicious'
+      : 'Clean');
+
+  const dgaMlStatus =
+    result?.security_analysis?.dga_ml ||
+    result?.aiMlAnalysis ||
+    (result?.threat_type === 'DGA_ML' ? 'High Risk' : 'Low Risk');
+
+  const behavioralStatus =
+    result?.security_analysis?.behavioral ||
+    result?.behavioralAnalysis ||
+    (result?.threat_type === 'dns_tunneling'
+      ? 'High Risk'
+      : result?.decision === 'FLAG'
+      ? 'Suspicious'
+      : 'Normal');
+
+  const currentScore = getRiskScore();
+  const currentRiskLevel = getRiskLevel();
+
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
       {/* Page Header */}
       <PageHeader
         title="Interactive Domain Security Checker"
-        subtitle="Multi-engine forensic inspection of domain reputations, lexical entropy, and threat indicators"
+        subtitle="Multi-engine forensic inspection of domain reputations, lexical entropy, ML DGA detection, and behavioral telemetry"
         icon={SearchCheck}
       />
 
@@ -118,7 +163,7 @@ export default function DomainCheckerPage() {
                 setDomainInput(e.target.value);
                 setError('');
               }}
-              placeholder="e.g. secure-login-account-update.xyz or github.com"
+              placeholder="e.g. example.com or xj29ak91qz.com"
               className="cyber-input font-mono text-sm pl-11 pr-4 py-3 bg-[#0a0f1d] border-slate-700/80 focus:border-sky-400 text-slate-100 rounded-lg shadow-inner"
               autoFocus
             />
@@ -214,88 +259,110 @@ export default function DomainCheckerPage() {
               </div>
 
               <div className="flex items-center gap-3">
+                {result.threat_type && (
+                  <div className="text-right">
+                    <span className="text-[10px] font-mono text-slate-400 block">Threat Classification</span>
+                    <StatusBadge type="threat" value={result.threat_type} className="text-xs font-mono" />
+                  </div>
+                )}
                 <div className="text-right">
-                  <span className="text-[10px] font-mono text-slate-400 block">Enforcement Decision</span>
+                  <span className="text-[10px] font-mono text-slate-400 block">Final Decision</span>
                   <StatusBadge type="decision" value={result.decision} className="text-sm px-3.5 py-1" />
                 </div>
               </div>
             </div>
 
-            {/* 4 Core Pillars Grid: Decision, Threat Intel, AI/ML Analysis, Behavioral Analysis */}
+            {/* 4 Core Pillars Grid: Blocklist, Threat Intel, AI/ML Analysis, Behavioral Analysis */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 my-6">
-              {/* Decision */}
+              {/* 1. Blocklist */}
               <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
                 <span className="text-[11px] font-mono uppercase text-slate-400 block mb-1">
-                  Decision
+                  Blocklist
                 </span>
                 <div className="flex items-center gap-2">
-                  {result.decision === 'ALLOW' && <ShieldCheck size={20} className="text-emerald-400" />}
-                  {result.decision === 'BLOCK' && <ShieldX size={20} className="text-rose-400" />}
-                  {result.decision === 'FLAG' && <ShieldAlert size={20} className="text-amber-400" />}
-                  <span className="text-base font-bold font-mono text-slate-100">
-                    {result.decision}
+                  {blocklistStatus === 'Clean' ? (
+                    <ShieldCheck size={20} className="text-emerald-400" />
+                  ) : (
+                    <ShieldX size={20} className="text-rose-400" />
+                  )}
+                  <span
+                    className={`text-base font-bold font-mono ${
+                      blocklistStatus === 'Clean' ? 'text-emerald-400' : 'text-rose-400'
+                    }`}
+                  >
+                    {blocklistStatus}
                   </span>
                 </div>
                 <span className="text-[11px] text-slate-400 mt-1 block">
-                  {result.decision === 'ALLOW' ? 'Whitelisted / Benign' :
-                   result.decision === 'BLOCK' ? 'Sinkholed / Intercepted' :
-                   'Flagged for Telemetry'}
+                  {blocklistStatus === 'Clean' ? 'Local policy: Unrestricted' : 'Local blocked-domain rule'}
                 </span>
               </div>
 
-              {/* Threat Intelligence */}
+              {/* 2. Threat Intelligence */}
               <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
                 <span className="text-[11px] font-mono uppercase text-slate-400 block mb-1">
                   Threat Intelligence
                 </span>
                 <div className="flex items-center gap-2">
                   <Radar size={18} className="text-sky-400" />
-                  <span className={`text-base font-bold font-mono ${
-                    result.threatIntel === 'Clean' ? 'text-emerald-400' :
-                    result.threatIntel === 'Malicious' ? 'text-rose-400' : 'text-slate-300'
-                  }`}>
-                    {result.threatIntel}
+                  <span
+                    className={`text-base font-bold font-mono ${
+                      threatIntelStatus === 'Clean' ? 'text-emerald-400' : 'text-rose-400'
+                    }`}
+                  >
+                    {threatIntelStatus}
                   </span>
                 </div>
                 <span className="text-[11px] text-slate-400 mt-1 block">
-                  Feed correlation: {result.threatCategory}
+                  {result.threat_type && result.threat_type !== 'blocked_domain' && result.threat_type !== 'DGA_ML'
+                    ? `Feed match: ${result.threat_type}`
+                    : 'AbuseIPDB & Threat Feeds'}
                 </span>
               </div>
 
-              {/* AI/ML Analysis */}
+              {/* 3. AI/ML Analysis */}
               <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
                 <span className="text-[11px] font-mono uppercase text-slate-400 block mb-1">
-                  AI/ML Analysis
+                  DGA / ML Analysis
                 </span>
                 <div className="flex items-center gap-2">
                   <Cpu size={18} className="text-purple-400" />
-                  <span className={`text-base font-bold font-mono ${
-                    result.aiMlAnalysis === 'Benign' ? 'text-emerald-400' :
-                    result.aiMlAnalysis === 'DGA' ? 'text-purple-400' : 'text-rose-400'
-                  }`}>
-                    {result.aiMlAnalysis}
+                  <span
+                    className={`text-base font-bold font-mono ${
+                      dgaMlStatus === 'High Risk' ? 'text-rose-400' : 'text-emerald-400'
+                    }`}
+                  >
+                    {dgaMlStatus}
                   </span>
                 </div>
                 <span className="text-[11px] text-slate-400 mt-1 block">
-                  Entropy & n-gram classifier
+                  {result.ml_confidence
+                    ? `Confidence: ${(result.ml_confidence * 100).toFixed(1)}%`
+                    : 'Lexical Random Forest Model'}
                 </span>
               </div>
 
-              {/* Behavioral Analysis */}
+              {/* 4. Behavioral Analysis */}
               <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
                 <span className="text-[11px] font-mono uppercase text-slate-400 block mb-1">
                   Behavioral Analysis
                 </span>
                 <div className="flex items-center gap-2">
                   <Activity size={18} className="text-amber-400" />
-                  <span className={`text-base font-bold font-mono ${
-                    result.behavioralAnalysis === 'Normal' ? 'text-emerald-400' : 'text-amber-400'
-                  }`}>
-                    {result.behavioralAnalysis}
+                  <span
+                    className={`text-base font-bold font-mono ${
+                      behavioralStatus === 'Normal'
+                        ? 'text-emerald-400'
+                        : behavioralStatus === 'Suspicious'
+                        ? 'text-amber-400'
+                        : 'text-rose-400'
+                    }`}
+                  >
+                    {behavioralStatus}
                   </span>
                 </div>
                 <span className="text-[11px] text-slate-400 mt-1 block">
-                  Burst rate & query cadence
+                  Cadence & DNS Tunneling check
                 </span>
               </div>
             </div>
@@ -309,7 +376,7 @@ export default function DomainCheckerPage() {
                 </span>
                 <div className="relative flex items-center justify-center">
                   <div className="text-4xl font-bold font-mono tracking-tight text-slate-100">
-                    {result.riskScore}
+                    {currentScore}
                     <span className="text-base text-slate-500 font-normal">/100</span>
                   </div>
                 </div>
@@ -317,13 +384,13 @@ export default function DomainCheckerPage() {
                 {/* Score bar */}
                 <div className="w-full bg-slate-800 h-2 rounded-full mt-3 overflow-hidden">
                   <div
-                    className={`h-full rounded-full transition-all duration-700 ${getRiskScoreBg(result.riskScore)}`}
-                    style={{ width: `${result.riskScore}%` }}
+                    className={`h-full rounded-full transition-all duration-700 ${getRiskScoreBg(currentScore)}`}
+                    style={{ width: `${currentScore}%` }}
                   />
                 </div>
 
-                <span className={`text-xs font-semibold font-mono mt-2 ${getRiskScoreColor(result.riskScore)}`}>
-                  {result.riskLevel}
+                <span className={`text-xs font-semibold font-mono mt-2 ${getRiskScoreColor(currentScore)}`}>
+                  {currentRiskLevel}
                 </span>
               </div>
 
@@ -331,28 +398,38 @@ export default function DomainCheckerPage() {
               <div className="md:col-span-2 flex flex-col justify-center">
                 <span className="text-xs font-mono uppercase text-slate-400 mb-1 flex items-center gap-1.5">
                   <Info size={14} className="text-sky-400" />
-                  Threat Engine Rationale
+                  Decision Reason
                 </span>
                 <p className="text-sm text-slate-200 leading-relaxed font-sans mt-1">
-                  {result.reason}
+                  {result.reason || 'No significant threat detected.'}
                 </p>
 
                 <div className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap gap-4 text-xs font-mono text-slate-400">
                   <div>
-                    <span className="text-slate-500">Registrar: </span>
-                    <span className="text-slate-300">{result.details.registrar}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500">Created: </span>
-                    <span className="text-slate-300">{result.details.createdDate}</span>
+                    <span className="text-slate-500">Resolved IP: </span>
+                    <span className="text-slate-300">{result.ip_address || result.details?.ipAddress || 'None'}</span>
                   </div>
                   <div>
                     <span className="text-slate-500">Entropy: </span>
-                    <span className="text-slate-300">{result.details.entropy}</span>
+                    <span className="text-slate-300">{result.entropy ?? result.details?.entropy ?? 'N/A'}</span>
                   </div>
                   <div>
-                    <span className="text-slate-500">Simulated IP: </span>
-                    <span className="text-slate-300">{result.details.ipAddress}</span>
+                    <span className="text-slate-500">AbuseIPDB Score: </span>
+                    <span className="text-slate-300">
+                      {result.abuse_confidence_score !== null && result.abuse_confidence_score !== undefined
+                        ? `${result.abuse_confidence_score}%`
+                        : 'N/A'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Enforcement: </span>
+                    <span className="text-slate-300">
+                      {result.decision === 'BLOCK'
+                        ? 'Sinkhole / NXDOMAIN'
+                        : result.decision === 'FLAG'
+                        ? 'Policy Warning'
+                        : 'Forward to Upstream'}
+                    </span>
                   </div>
                 </div>
               </div>

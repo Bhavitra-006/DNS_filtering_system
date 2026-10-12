@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   ShieldBan,
   Plus,
@@ -11,6 +11,7 @@ import {
   FileText,
   Filter,
   Info,
+  RotateCcw,
 } from 'lucide-react';
 
 import PageHeader from '../components/common/PageHeader';
@@ -21,11 +22,14 @@ import StatusBadge from '../components/common/StatusBadge';
 import Button from '../components/common/Button';
 import Modal from '../components/common/Modal';
 
-import { INITIAL_BLOCKED_DOMAINS } from '../data/mockData';
+import { getBlockedDomains, addBlockedDomain, deleteBlockedDomain } from '../api/api';
 import { exportDataAsFile } from '../utils/formatters';
 
 export default function BlockedDomainsPage() {
-  const [blockedList, setBlockedList] = useState(INITIAL_BLOCKED_DOMAINS);
+  const [blockedList, setBlockedList] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState('');
+
   const [searchTerm, setSearchTerm] = useState('');
   const [threatFilter, setThreatFilter] = useState('ALL');
   const [sourceFilter, setSourceFilter] = useState('ALL');
@@ -40,12 +44,16 @@ export default function BlockedDomainsPage() {
   const [newDomain, setNewDomain] = useState('');
   const [newThreatType, setNewThreatType] = useState('Phishing');
   const [newSource, setNewSource] = useState('Admin Rule');
-  const [newAction, setNewAction] = useState('Block');
+  const [newAction, setNewAction] = useState('Block & Sinkhole');
   const [addError, setAddError] = useState('');
+  const [addLoading, setAddLoading] = useState(false);
 
   // Bulk Import state
   const [bulkInput, setBulkInput] = useState('');
-  const [importSummary, setImportSummary] = useState(null);
+  const [bulkLoading, setBulkLoading] = useState(false);
+
+  // Delete loading
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   // Toast feedback
   const [toastMessage, setToastMessage] = useState('');
@@ -54,6 +62,41 @@ export default function BlockedDomainsPage() {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(''), 3500);
   };
+
+  // Map backend record to UI record
+  const mapRecord = (r) => ({
+    id: r.id || `blk-${r.domain}`,
+    domain: r.domain,
+    source: r.source || 'Unknown',
+    threatType: r.threat_type || 'Malicious Domain',
+    addedDate: r.created_at
+      ? r.created_at.replace('T', ' ').substring(0, 19)
+      : '-',
+    status: 'ACTIVE',
+    hitsCount: 0,
+    riskScore: 90,
+    action: 'Block',
+  });
+
+  const loadDomains = useCallback(async () => {
+    try {
+      setLoading(true);
+      setApiError('');
+      const data = await getBlockedDomains();
+      const details = Array.isArray(data?.details) ? data.details : [];
+      setBlockedList(details.map(mapRecord));
+    } catch (err) {
+      console.error('Failed to load blocked domains:', err);
+      setApiError('Unable to load blocked domains from backend.');
+      setBlockedList([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDomains();
+  }, [loadDomains]);
 
   // Filtered domains
   const filteredDomains = useMemo(() => {
@@ -90,8 +133,8 @@ export default function BlockedDomainsPage() {
   };
 
   // Handlers
-  const handleAddDomain = (e) => {
-    e.preventDefault();
+  const handleAddDomain = async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
     const domainClean = newDomain.trim().toLowerCase();
 
     if (!domainClean) {
@@ -109,61 +152,85 @@ export default function BlockedDomainsPage() {
       return;
     }
 
-    const newRecord = {
-      id: `blk-${Date.now()}`,
-      domain: domainClean,
-      source: newSource,
-      threatType: newThreatType,
-      addedDate: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      status: 'ACTIVE',
-      hitsCount: 0,
-      riskScore: 90,
-      action: newAction,
-    };
-
-    setBlockedList([newRecord, ...blockedList]);
-    setNewDomain('');
-    setAddError('');
-    setIsAddModalOpen(false);
-    showToast(`Domain "${domainClean}" added to active blocklist.`);
+    try {
+      setAddLoading(true);
+      setAddError('');
+      await addBlockedDomain({
+        domain: domainClean,
+        threat_type: newThreatType,
+        source: newSource,
+      });
+      setNewDomain('');
+      setIsAddModalOpen(false);
+      showToast(`Domain "${domainClean}" added to active blocklist.`);
+      await loadDomains(); // Refresh from backend
+    } catch (err) {
+      setAddError(err.message || 'Failed to add domain. Please try again.');
+    } finally {
+      setAddLoading(false);
+    }
   };
 
-  const handleConfirmDelete = () => {
+  const handleConfirmDelete = async () => {
     if (!domainToDelete) return;
-    setBlockedList((prev) => prev.filter((item) => item.id !== domainToDelete.id));
-    showToast(`Domain "${domainToDelete.domain}" unblocked and removed.`);
-    setDomainToDelete(null);
+    try {
+      setDeleteLoading(true);
+      await deleteBlockedDomain(domainToDelete.domain);
+      showToast(`Domain "${domainToDelete.domain}" unblocked and removed.`);
+      setDomainToDelete(null);
+      await loadDomains(); // Refresh from backend
+    } catch (err) {
+      showToast(`Error: ${err.message || 'Failed to remove domain.'}`);
+      setDomainToDelete(null);
+    } finally {
+      setDeleteLoading(false);
+    }
   };
 
-  const handleBulkImport = () => {
+  const handleBulkImport = async () => {
     const lines = bulkInput
       .split('\n')
       .map((l) => l.trim().toLowerCase())
       .filter((l) => l && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(l));
 
     if (lines.length === 0) {
-      setAddError('No valid domains found in import payload.');
+      showToast('No valid domains found in import payload.');
       return;
     }
 
     const uniqueNew = lines.filter((d) => !blockedList.some((existing) => existing.domain === d));
 
-    const newEntries = uniqueNew.map((domain, i) => ({
-      id: `blk-imp-${Date.now()}-${i}`,
-      domain,
-      source: 'Bulk File Import',
-      threatType: 'Malicious Domain',
-      addedDate: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      status: 'ACTIVE',
-      hitsCount: 0,
-      riskScore: 85,
-      action: 'Block',
-    }));
+    if (uniqueNew.length === 0) {
+      showToast('All domains in the import are already blocked.');
+      setIsImportModalOpen(false);
+      setBulkInput('');
+      return;
+    }
 
-    setBlockedList([...newEntries, ...blockedList]);
-    setIsImportModalOpen(false);
-    setBulkInput('');
-    showToast(`Successfully imported ${newEntries.length} new domain(s) into blocklist.`);
+    try {
+      setBulkLoading(true);
+      let successCount = 0;
+      for (const domain of uniqueNew) {
+        try {
+          await addBlockedDomain({
+            domain,
+            threat_type: 'Malicious Domain',
+            source: 'Bulk File Import',
+          });
+          successCount++;
+        } catch {
+          // Skip duplicates or errors for individual domains
+        }
+      }
+      setIsImportModalOpen(false);
+      setBulkInput('');
+      showToast(`Successfully imported ${successCount} new domain(s) into blocklist.`);
+      await loadDomains();
+    } catch (err) {
+      showToast(`Bulk import error: ${err.message}`);
+    } finally {
+      setBulkLoading(false);
+    }
   };
 
   const columns = [
@@ -268,6 +335,15 @@ export default function BlockedDomainsPage() {
             <Button
               variant="secondary"
               size="sm"
+              icon={RotateCcw}
+              onClick={loadDomains}
+              disabled={loading}
+            >
+              {loading ? 'Loading...' : 'Refresh'}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
               icon={Upload}
               onClick={() => setIsImportModalOpen(true)}
             >
@@ -295,6 +371,14 @@ export default function BlockedDomainsPage() {
           </div>
         }
       />
+
+      {/* Error Banner */}
+      {apiError && (
+        <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
+          <AlertTriangle size={15} className="flex-shrink-0" />
+          <span>{apiError} — Showing cached data or empty list.</span>
+        </div>
+      )}
 
       {/* Search and Filters */}
       <div className="p-4 rounded-xl bg-[#0f172a] border border-slate-800/90 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
@@ -341,14 +425,21 @@ export default function BlockedDomainsPage() {
       </div>
 
       {/* Domains Table */}
-      <DataTable
-        columns={columns}
-        data={filteredDomains}
-        pageSize={10}
-        pageSizeOptions={[10, 20, 50]}
-        emptyTitle="No Blocked Domains Found"
-        emptyDescription="No domains matched your criteria. You can manually add a domain to block using the button above."
-      />
+      {loading ? (
+        <div className="p-8 rounded-xl bg-[#0f172a] border border-slate-800/90 text-center">
+          <div className="text-sky-400 text-sm font-medium">Loading blocked domains...</div>
+          <div className="text-slate-500 text-xs mt-1">Fetching blocklist from backend</div>
+        </div>
+      ) : (
+        <DataTable
+          columns={columns}
+          data={filteredDomains}
+          pageSize={10}
+          pageSizeOptions={[10, 20, 50]}
+          emptyTitle="No Blocked Domains Found"
+          emptyDescription="No domains matched your criteria. You can manually add a domain to block using the button above."
+        />
+      )}
 
       {/* Add Domain Modal */}
       <Modal
@@ -370,6 +461,7 @@ export default function BlockedDomainsPage() {
               variant="primary"
               size="sm"
               icon={Plus}
+              loading={addLoading}
               onClick={handleAddDomain}
             >
               Enforce Block Rule
@@ -451,10 +543,10 @@ export default function BlockedDomainsPage() {
               onChange={(e) => setNewAction(e.target.value)}
               className="cyber-select w-full"
             >
-              <option value="Block & Sinkhole">Block & Sinkhole (0.0.0.0)</option>
+              <option value="Block & Sinkhole">Block &amp; Sinkhole (0.0.0.0)</option>
               <option value="Block with NXDOMAIN">Block with NXDOMAIN</option>
-              <option value="Block & Alert SOC">Block & Alert SOC Team</option>
-              <option value="Block & Quarantine Client">Block & Quarantine Client</option>
+              <option value="Block & Alert SOC">Block &amp; Alert SOC Team</option>
+              <option value="Block & Quarantine Client">Block &amp; Quarantine Client</option>
             </select>
           </div>
         </form>
@@ -480,6 +572,7 @@ export default function BlockedDomainsPage() {
               variant="danger"
               size="sm"
               icon={Trash2}
+              loading={deleteLoading}
               onClick={handleConfirmDelete}
             >
               Confirm Unblock
@@ -520,6 +613,7 @@ export default function BlockedDomainsPage() {
               variant="primary"
               size="sm"
               icon={Upload}
+              loading={bulkLoading}
               onClick={handleBulkImport}
             >
               Import Domains
@@ -573,7 +667,7 @@ export default function BlockedDomainsPage() {
               className="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-sky-500 text-left transition-colors"
             >
               <div className="font-semibold text-slate-100 mb-1">JSON Format</div>
-              <div className="text-[11px] text-slate-400">Complete structured schema with hit metrics and IOC metadata.</div>
+              <div className="text-[11px] text-slate-400">Complete structured schema with IOC metadata.</div>
             </button>
             <button
               type="button"
